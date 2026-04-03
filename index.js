@@ -10,28 +10,33 @@ app.use(helmet());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST;
+const KEY = process.env.RAPIDAPI_KEY;
+const HOST = process.env.RAPIDAPI_HOST;
+
+const api = axios.create({
+  baseURL: `https://${HOST}/api/v1`,
+  headers: { 'X-RapidAPI-Key': KEY, 'X-RapidAPI-Host': HOST }
+});
 
 // ══ MOTEUR ODDLY ══
 
 function poisson(k, lambda) {
-  let result = Math.exp(-lambda);
-  for (let i = 1; i <= k; i++) result *= lambda / i;
-  return result;
+  let r = Math.exp(-lambda);
+  for (let i = 1; i <= k; i++) r *= lambda / i;
+  return r;
 }
 
-function calculPoisson(lambdaA, lambdaB) {
-  const probs = { home: 0, draw: 0, away: 0 };
-  for (let i = 0; i <= 6; i++) {
-    for (let j = 0; j <= 6; j++) {
-      const p = poisson(i, lambdaA) * poisson(j, lambdaB);
-      if (i > j) probs.home += p;
-      else if (i === j) probs.draw += p;
-      else probs.away += p;
+function calculPoisson(lA, lB) {
+  let h = 0, d = 0, a = 0;
+  for (let i = 0; i <= 7; i++) {
+    for (let j = 0; j <= 7; j++) {
+      const p = poisson(i, lA) * poisson(j, lB);
+      if (i > j) h += p;
+      else if (i === j) d += p;
+      else a += p;
     }
   }
-  return probs;
+  return { home: h, draw: d, away: a };
 }
 
 function poissonRandom(lambda) {
@@ -40,144 +45,231 @@ function poissonRandom(lambda) {
   return k - 1;
 }
 
-function monteCarlo(lambdaA, lambdaB, n = 10000) {
-  let home = 0, draw = 0, away = 0;
+function monteCarlo(lA, lB, n = 10000) {
+  let h = 0, d = 0, a = 0;
   for (let i = 0; i < n; i++) {
-    const a = poissonRandom(lambdaA);
-    const b = poissonRandom(lambdaB);
-    if (a > b) home++;
-    else if (a === b) draw++;
-    else away++;
+    const ga = poissonRandom(lA), gb = poissonRandom(lB);
+    if (ga > gb) h++;
+    else if (ga === gb) d++;
+    else a++;
   }
-  return {
-    home: (home / n).toFixed(3),
-    draw: (draw / n).toFixed(3),
-    away: (away / n).toFixed(3),
-  };
+  return { home: +(h/n).toFixed(3), draw: +(d/n).toFixed(3), away: +(a/n).toFixed(3) };
 }
 
-function calculEV(prob, cote) {
-  return ((prob * cote) - 1).toFixed(3);
+function ev(prob, cote) { return +((prob * cote) - 1).toFixed(3); }
+function kelly(prob, cote) { return +(((prob * cote - 1) / (cote - 1)) * 0.5).toFixed(3); }
+
+function biais(pctFoule, probReelle) {
+  const diff = pctFoule - probReelle;
+  if (diff > 0.25) return { signal: '🔄 REVERSE FORT', force: 'FORT', desc: 'La foule surestime massivement — valeur de l\'autre côté' };
+  if (diff > 0.12) return { signal: '⚠️ REVERSE MODÉRÉ', force: 'MODERE', desc: 'Légère surestimation — signal modéré' };
+  if (diff < -0.15) return { signal: '✅ FOULE A RAISON', force: 'CONFIRME', desc: 'Le biais confirme notre signal' };
+  return { signal: '➡️ NEUTRE', force: 'FAIBLE', desc: 'Pas de biais significatif détecté' };
 }
 
-function calculKelly(prob, cote) {
-  return (((prob * cote - 1) / (cote - 1)) * 0.5).toFixed(3);
+function getLambda(matchs, isHome) {
+  if (!matchs || matchs.length === 0) return 1.2;
+  let totalButs = 0, count = 0;
+  matchs.slice(0, 5).forEach(m => {
+    if (!m.homeScore || !m.awayScore) return;
+    const estDomicile = isHome ? m.homeTeam?.id === m.homeTeam?.id : false;
+    const buts = isHome ? (m.homeScore.current || 0) : (m.awayScore.current || 0);
+    totalButs += buts;
+    count++;
+  });
+  return count > 0 ? Math.max(0.3, totalButs / count) : 1.2;
 }
 
-function detecterBiais(biasFoule, probReelle) {
-  const diff = biasFoule - probReelle;
-  if (diff > 0.2) return { signal: 'REVERSE 🔄', force: 'FORT', description: 'La foule surestime massivement' };
-  if (diff > 0.1) return { signal: 'ATTENTION ⚠️', force: 'MODERE', description: 'Légère surestimation foule' };
-  return { signal: 'OK ✅', force: 'FAIBLE', description: 'Pas de biais détecté' };
+function getFormeString(matchs, teamId) {
+  if (!matchs || matchs.length === 0) return 'N/A';
+  return matchs.slice(0, 5).map(m => {
+    const isHome = m.homeTeam?.id === teamId;
+    const scoreHome = m.homeScore?.current || 0;
+    const scoreAway = m.awayScore?.current || 0;
+    if (isHome) return scoreHome > scoreAway ? 'V' : scoreHome === scoreAway ? 'N' : 'D';
+    return scoreAway > scoreHome ? 'V' : scoreAway === scoreHome ? 'N' : 'D';
+  }).join(' ');
 }
 
 function getSignal(probs, cH, cD, cA) {
-  const evH = cH ? parseFloat(calculEV(probs.home, cH)) : -1;
-  const evD = cD ? parseFloat(calculEV(probs.draw, cD)) : -1;
-  const evA = cA ? parseFloat(calculEV(probs.away, cA)) : -1;
+  const evH = cH ? ev(probs.home, cH) : -99;
+  const evD = cD ? ev(probs.draw, cD) : -99;
+  const evA = cA ? ev(probs.away, cA) : -99;
   const maxEV = Math.max(evH, evD, evA);
-  if (maxEV > 0.1) return {
-    pari: evH === maxEV ? 'HOME 🏠' : evD === maxEV ? 'DRAW 🤝' : 'AWAY ✈️',
-    ev: maxEV,
-    force: maxEV > 0.2 ? '🔥 FORT' : '⚡ MODERE'
-  };
-  return { pari: 'AUCUN ❌', ev: maxEV, force: 'FAIBLE' };
+  const pari = evH === maxEV ? '🏠 DOMICILE' : evD === maxEV ? '🤝 NUL' : '✈️ EXTÉRIEUR';
+  const force = maxEV > 0.15 ? '🔥 FORT' : maxEV > 0.05 ? '⚡ MODÉRÉ' : '❌ AUCUN';
+  const mise = maxEV > 0.05 ? +(Math.max(0, kelly(probs[maxEV === evH ? 'home' : maxEV === evD ? 'draw' : 'away'], maxEV === evH ? cH : maxEV === evD ? cD : cA)) * 100).toFixed(1) : 0;
+  return { pari, ev: maxEV, force, mise: `${mise}% de la bankroll` };
 }
 
 // ══ ROUTES ══
 
 app.get('/', (req, res) => {
-  res.json({
-    status: 'Oddly Backend v1.0 — Online ✅',
-    timestamp: new Date(),
-    endpoints: [
-      'GET  /api/matchs-aujourd-hui',
-      'GET  /api/matchs-live',
-      'POST /api/analyse',
-    ]
-  });
+  res.json({ status: 'Oddly Backend v2.0 ✅', timestamp: new Date() });
 });
 
 // Matchs du jour
 app.get('/api/matchs-aujourd-hui', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
-    const response = await axios.get('https://sportapi7.p.rapidapi.com/api/v1/sport/football/scheduled-events/' + today, {
-      headers: {
-        'X-RapidAPI-Key': RAPIDAPI_KEY,
-        'X-RapidAPI-Host': RAPIDAPI_HOST,
-      }
-    });
-    const matchs = response.data.events?.slice(0, 20).map(e => ({
+    const r = await api.get(`/sport/football/scheduled-events/${today}`);
+    const matchs = (r.data.events || []).slice(0, 25).map(e => ({
       id: e.id,
       competition: e.tournament?.name,
       domicile: e.homeTeam?.name,
+      domicileId: e.homeTeam?.id,
       exterieur: e.awayTeam?.name,
+      exterieurId: e.awayTeam?.id,
       heure: new Date(e.startTimestamp * 1000).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
       statut: e.status?.description,
     }));
-    res.json({ success: true, date: today, total: matchs?.length, matchs });
+    res.json({ success: true, total: matchs.length, matchs });
   } catch (err) {
-    res.status(500).json({ error: 'Erreur API', details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 // Matchs live
 app.get('/api/matchs-live', async (req, res) => {
   try {
-    const response = await axios.get('https://sportapi7.p.rapidapi.com/api/v1/sport/football/events/live', {
-      headers: {
-        'X-RapidAPI-Key': RAPIDAPI_KEY,
-        'X-RapidAPI-Host': RAPIDAPI_HOST,
-      }
-    });
-    const matchs = response.data.events?.slice(0, 10).map(e => ({
+    const r = await api.get('/sport/football/events/live');
+    const matchs = (r.data.events || []).slice(0, 15).map(e => ({
       id: e.id,
       competition: e.tournament?.name,
       domicile: e.homeTeam?.name,
+      domicileId: e.homeTeam?.id,
       scoreDom: e.homeScore?.current,
       scoreExt: e.awayScore?.current,
       exterieur: e.awayTeam?.name,
+      exterieurId: e.awayTeam?.id,
       minute: e.time?.played,
       statut: e.status?.description,
     }));
-    res.json({ success: true, total: matchs?.length, matchs });
+    res.json({ success: true, total: matchs.length, matchs });
   } catch (err) {
-    res.status(500).json({ error: 'Erreur API', details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Analyse moteur Oddly
-app.post('/api/analyse', (req, res) => {
-  const { lambdaHome, lambdaAway, coteHome, coteDraw, coteAway, biasFoule } = req.body;
-  if (!lambdaHome || !lambdaAway) {
-    return res.status(400).json({ error: 'lambdaHome et lambdaAway requis' });
-  }
-  const probs = calculPoisson(lambdaHome, lambdaAway);
-  const mc = monteCarlo(lambdaHome, lambdaAway);
-  res.json({
-    success: true,
-    analyse: {
-      poisson: probs,
-      monteCarlo: mc,
+// Analyse complète d'un match
+app.get('/api/analyse/:matchId', async (req, res) => {
+  try {
+    const { matchId } = req.params;
+
+    // Récupère les détails du match
+    const matchR = await api.get(`/event/${matchId}`);
+    const match = matchR.data.event;
+    const homeId = match.homeTeam.id;
+    const awayId = match.awayTeam.id;
+
+    // Récupère la forme des deux équipes en parallèle
+    const [homeFormR, awayFormR, oddsR] = await Promise.allSettled([
+      api.get(`/team/${homeId}/events/last/0`),
+      api.get(`/team/${awayId}/events/last/0`),
+      api.get(`/event/${matchId}/odds/1/all/1`),
+    ]);
+
+    const homeMatchs = homeFormR.status === 'fulfilled' ? (homeFormR.value.data.events || []) : [];
+    const awayMatchs = awayFormR.status === 'fulfilled' ? (awayFormR.value.data.events || []) : [];
+
+    // Calcul lambdas réels
+    const lambdaHome = getLambda(homeMatchs, true);
+    const lambdaAway = getLambda(awayMatchs, false);
+
+    // Forme récente
+    const formeHome = getFormeString(homeMatchs, homeId);
+    const formeAway = getFormeString(awayMatchs, awayId);
+
+    // Stats derniers 5 matchs
+    const statsHome = homeMatchs.slice(0, 5).map(m => ({
+      adversaire: m.homeTeam?.id === homeId ? m.awayTeam?.name : m.homeTeam?.name,
+      score: `${m.homeScore?.current || 0}-${m.awayScore?.current || 0}`,
+      competition: m.tournament?.name,
+    }));
+
+    const statsAway = awayMatchs.slice(0, 5).map(m => ({
+      adversaire: m.homeTeam?.id === awayId ? m.awayTeam?.name : m.homeTeam?.name,
+      score: `${m.homeScore?.current || 0}-${m.awayScore?.current || 0}`,
+      competition: m.tournament?.name,
+    }));
+
+    // Cotes bookmakers
+    let cotes = { home: null, draw: null, away: null, bookmaker: 'N/A' };
+    if (oddsR.status === 'fulfilled') {
+      const markets = oddsR.value.data?.markets || [];
+      const ft = markets.find(m => m.marketName === 'Full time');
+      if (ft && ft.choices) {
+        ft.choices.forEach(c => {
+          if (c.name === '1') cotes.home = parseFloat(c.fractionalValue || c.odd);
+          if (c.name === 'X') cotes.draw = parseFloat(c.fractionalValue || c.odd);
+          if (c.name === '2') cotes.away = parseFloat(c.fractionalValue || c.odd);
+        });
+        cotes.bookmaker = ft.bookmakerName || 'Bookmaker';
+      }
+    }
+
+    // Calculs moteur
+    const probs = calculPoisson(lambdaHome, lambdaAway);
+    const mc = monteCarlo(lambdaHome, lambdaAway);
+    const signal = getSignal(probs, cotes.home, cotes.draw, cotes.away);
+
+    // Biais foule (estimation basée sur les cotes implicites)
+    const impliedHome = cotes.home ? 1 / cotes.home : 0.45;
+    const biaisResult = biais(impliedHome, probs.home);
+
+    // Confiance globale
+    const confiance = Math.min(99, Math.round(
+      (Math.abs(signal.ev) * 100 * 0.4) +
+      (homeMatchs.length * 2 * 0.3) +
+      (cotes.home ? 20 : 0) * 0.3
+    ));
+
+    res.json({
+      success: true,
+      match: {
+        domicile: match.homeTeam.name,
+        exterieur: match.awayTeam.name,
+        competition: match.tournament?.name,
+        heure: new Date(match.startTimestamp * 1000).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+      },
+      lambdas: { home: +lambdaHome.toFixed(2), away: +lambdaAway.toFixed(2) },
+      forme: {
+        home: formeHome,
+        away: formeAway,
+        derniers5Home: statsHome,
+        derniers5Away: statsAway,
+      },
+      cotes,
+      probs: {
+        home: +(probs.home * 100).toFixed(1),
+        draw: +(probs.draw * 100).toFixed(1),
+        away: +(probs.away * 100).toFixed(1),
+      },
+      monteCarlo: {
+        home: +(mc.home * 100).toFixed(1),
+        draw: +(mc.draw * 100).toFixed(1),
+        away: +(mc.away * 100).toFixed(1),
+      },
       ev: {
-        home: coteHome ? calculEV(probs.home, coteHome) : null,
-        draw: coteDraw ? calculEV(probs.draw, coteDraw) : null,
-        away: coteAway ? calculEV(probs.away, coteAway) : null,
+        home: cotes.home ? ev(probs.home, cotes.home) : null,
+        draw: cotes.draw ? ev(probs.draw, cotes.draw) : null,
+        away: cotes.away ? ev(probs.away, cotes.away) : null,
       },
       kelly: {
-        home: coteHome ? calculKelly(probs.home, coteHome) : null,
-        draw: coteDraw ? calculKelly(probs.draw, coteDraw) : null,
-        away: coteAway ? calculKelly(probs.away, coteAway) : null,
+        home: cotes.home ? kelly(probs.home, cotes.home) : null,
+        draw: cotes.draw ? kelly(probs.draw, cotes.draw) : null,
+        away: cotes.away ? kelly(probs.away, cotes.away) : null,
       },
-      biais: biasFoule ? detecterBiais(biasFoule, probs.home) : null,
-      signal: getSignal(probs, coteHome, coteDraw, coteAway),
-    }
-  });
+      signal,
+      biais: biaisResult,
+      confiance,
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Oddly Backend démarré sur http://localhost:${PORT}`);
-  console.log(`📅 Matchs du jour : http://localhost:${PORT}/api/matchs-aujourd-hui`);
-  console.log(`🔴 Matchs live    : http://localhost:${PORT}/api/matchs-live`);
+  console.log(`✅ Oddly Backend v2.0 — http://localhost:${PORT}`);
 });
