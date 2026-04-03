@@ -18,6 +18,25 @@ const api = axios.create({
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ══ GRANDES LIGUES ══
+const GRANDES_LIGUES = [
+  39,   // Premier League
+  140,  // LaLiga
+  61,   // Ligue 1
+  135,  // Serie A
+  78,   // Bundesliga
+  2,    // Champions League
+  3,    // Europa League
+  848,  // Conference League
+  88,   // Eredivisie
+  94,   // Primeira Liga
+  144,  // Jupiler Pro League
+  40,   // Championship
+  253,  // MLS
+  71,   // Brasileirao
+  128,  // Liga Argentina
+];
+
 // ══ CACHE ══
 const cache = new Map();
 function getCache(key) {
@@ -30,7 +49,7 @@ function setCache(key, data, ttl = 3600000) {
   cache.set(key, { data, time: Date.now(), ttl });
 }
 
-// ══ MOTEUR ODDLY ══
+// ══ MOTEUR ══
 function poisson(k, lambda) {
   let r = Math.exp(-lambda);
   for (let i = 1; i <= k; i++) r *= lambda / i;
@@ -154,28 +173,37 @@ function getDerniers(fixtures, teamId) {
 
 // ══ ROUTES ══
 app.get('/', (req, res) => {
-  res.json({ status: 'Oddly Backend v5.0 ✅ — API Football only', timestamp: new Date() });
+  res.json({ status: 'Oddly Backend v5.0 ✅', timestamp: new Date() });
 });
 
-// Matchs du jour
+// Matchs grandes ligues aujourd'hui
 app.get('/api/matchs-aujourd-hui', async (req, res) => {
   const cached = getCache('matchs-aujourd-hui');
   if (cached) return res.json(cached);
   try {
     const today = new Date().toISOString().split('T')[0];
+    // Récupère les matchs de toutes les grandes ligues en une seule requête
     const r = await api.get(`/fixtures?date=${today}&timezone=Europe/Paris`);
-    const matchs = (r.data.response || []).slice(0, 30).map(f => ({
-      id: f.fixture.id,
-      competition: f.league?.name,
-      domicile: f.teams?.home?.name,
-      domicileId: f.teams?.home?.id,
-      exterieur: f.teams?.away?.name,
-      exterieurId: f.teams?.away?.id,
-      heure: new Date(f.fixture.date).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-      statut: f.fixture?.status?.long,
-      scoreDom: f.goals?.home,
-      scoreExt: f.goals?.away,
-    }));
+    const tous = r.data.response || [];
+
+    // Filtre uniquement les grandes ligues
+    const matchs = tous
+      .filter(f => GRANDES_LIGUES.includes(f.league?.id))
+      .slice(0, 30)
+      .map(f => ({
+        id: f.fixture.id,
+        competition: f.league?.name,
+        leagueId: f.league?.id,
+        domicile: f.teams?.home?.name,
+        domicileId: f.teams?.home?.id,
+        exterieur: f.teams?.away?.name,
+        exterieurId: f.teams?.away?.id,
+        heure: new Date(f.fixture.date).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+        statut: f.fixture?.status?.long,
+        scoreDom: f.goals?.home,
+        scoreExt: f.goals?.away,
+      }));
+
     const result = { success: true, total: matchs.length, matchs };
     setCache('matchs-aujourd-hui', result, 900000);
     res.json(result);
@@ -184,26 +212,59 @@ app.get('/api/matchs-aujourd-hui', async (req, res) => {
   }
 });
 
-// Matchs live
+// Matchs live grandes ligues
 app.get('/api/matchs-live', async (req, res) => {
   const cached = getCache('matchs-live');
   if (cached) return res.json(cached);
   try {
     const r = await api.get('/fixtures?live=all');
-    const matchs = (r.data.response || []).slice(0, 20).map(f => ({
-      id: f.fixture.id,
-      competition: f.league?.name,
-      domicile: f.teams?.home?.name,
-      domicileId: f.teams?.home?.id,
-      scoreDom: f.goals?.home,
-      scoreExt: f.goals?.away,
-      exterieur: f.teams?.away?.name,
-      exterieurId: f.teams?.away?.id,
-      minute: f.fixture?.status?.elapsed,
-      statut: f.fixture?.status?.long,
-    }));
+    const matchs = (r.data.response || [])
+      .filter(f => GRANDES_LIGUES.includes(f.league?.id))
+      .slice(0, 20)
+      .map(f => ({
+        id: f.fixture.id,
+        competition: f.league?.name,
+        domicile: f.teams?.home?.name,
+        domicileId: f.teams?.home?.id,
+        scoreDom: f.goals?.home,
+        scoreExt: f.goals?.away,
+        exterieur: f.teams?.away?.name,
+        exterieurId: f.teams?.away?.id,
+        minute: f.fixture?.status?.elapsed,
+        statut: f.fixture?.status?.long,
+      }));
     const result = { success: true, total: matchs.length, matchs };
-    setCache('matchs-live', result, 60000); // 1min cache pour live
+    setCache('matchs-live', result, 60000);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Matchs de demain
+app.get('/api/matchs-demain', async (req, res) => {
+  const cached = getCache('matchs-demain');
+  if (cached) return res.json(cached);
+  try {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const date = tomorrow.toISOString().split('T')[0];
+    const r = await api.get(`/fixtures?date=${date}&timezone=Europe/Paris`);
+    const matchs = (r.data.response || [])
+      .filter(f => GRANDES_LIGUES.includes(f.league?.id))
+      .slice(0, 30)
+      .map(f => ({
+        id: f.fixture.id,
+        competition: f.league?.name,
+        domicile: f.teams?.home?.name,
+        domicileId: f.teams?.home?.id,
+        exterieur: f.teams?.away?.name,
+        exterieurId: f.teams?.away?.id,
+        heure: new Date(f.fixture.date).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+        statut: f.fixture?.status?.long,
+      }));
+    const result = { success: true, total: matchs.length, matchs };
+    setCache('matchs-demain', result, 3600000);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -214,7 +275,6 @@ app.get('/api/matchs-live', async (req, res) => {
 app.get('/api/analyse/:matchId', async (req, res) => {
   const { matchId } = req.params;
   const { home, away, competition } = req.query;
-
   const cached = getCache(`analyse-${matchId}`);
   if (cached) return res.json(cached);
 
@@ -222,7 +282,6 @@ app.get('/api/analyse/:matchId', async (req, res) => {
     const homeName = home || 'Domicile';
     const awayName = away || 'Extérieur';
 
-    // Cherche les équipes
     const [homeSearch, awaySearch] = await Promise.all([
       api.get(`/teams?search=${encodeURIComponent(homeName)}`),
       api.get(`/teams?search=${encodeURIComponent(awayName)}`),
@@ -248,17 +307,13 @@ app.get('/api/analyse/:matchId', async (req, res) => {
       odds = oddsF.data.response || [];
     }
 
-    // Lambdas
     const lHome = homeTeam ? getLambda(homeFixtures, homeTeam.id) : 1.2;
     const lAway = awayTeam ? getLambda(awayFixtures, awayTeam.id) : 1.1;
-
-    // Forme
     const formeHome = homeTeam ? getForme(homeFixtures, homeTeam.id) : '? ? ? ? ?';
     const formeAway = awayTeam ? getForme(awayFixtures, awayTeam.id) : '? ? ? ? ?';
     const derniers5Home = homeTeam ? getDerniers(homeFixtures, homeTeam.id) : [];
     const derniers5Away = awayTeam ? getDerniers(awayFixtures, awayTeam.id) : [];
 
-    // H2H
     let h2hStats = { homeWins: 0, draws: 0, awayWins: 0, matchs: [] };
     h2hFixtures.filter(f => f.fixture?.status?.short === 'FT').slice(0, 5).forEach(f => {
       const gH = f.goals?.home || 0, gA = f.goals?.away || 0;
@@ -274,7 +329,6 @@ app.get('/api/analyse/:matchId', async (req, res) => {
       });
     });
 
-    // Cotes depuis API-Football
     let cotes = { home: null, draw: null, away: null, bookmaker: 'N/A' };
     if (odds.length > 0) {
       const bookie = odds[0]?.bookmakers?.[0];
@@ -291,18 +345,14 @@ app.get('/api/analyse/:matchId', async (req, res) => {
       }
     }
 
-    // Calculs
     const probs = calculPoisson(lHome, lAway);
     const mc = monteCarlo(lHome, lAway);
     const pariConseille = getPariConseille(probs, cotes, mc);
     const impliedHome = cotes.home ? +(1/cotes.home).toFixed(3) : 0.45;
     const biaisResult = detecterBiais(impliedHome, probs.home);
-
     const confiance = Math.min(95, Math.round(
-      50 +
-      (homeFixtures.length >= 5 ? 15 : homeFixtures.length * 3) +
-      (cotes.home ? 15 : 0) +
-      (h2hFixtures.length >= 3 ? 10 : 0) +
+      50 + (homeFixtures.length >= 5 ? 15 : homeFixtures.length * 3) +
+      (cotes.home ? 15 : 0) + (h2hFixtures.length >= 3 ? 10 : 0) +
       (Math.abs(lHome - lAway) * 5)
     ));
 
